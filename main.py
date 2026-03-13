@@ -230,6 +230,8 @@ class MainWindow(QMainWindow):
         }
 
         self.actual_freight_tasks = []
+        self.actual_freight_edited_rows: set[int] = set()
+        self._is_refreshing_actual_freight_table = False
 
         self.batch_states = [
             "已导入",
@@ -710,10 +712,21 @@ class MainWindow(QMainWindow):
         layout.addLayout(top_row)
 
         if stage_key == "actual_freight":
+            self.btn_save_actual_freight_current = QPushButton("保存当前行")
+            self.btn_save_actual_freight_current.setObjectName("PrimaryButton")
+            self.btn_save_actual_freight_current.clicked.connect(self._save_actual_freight_current_row)
+
+            self.btn_save_actual_freight_all = QPushButton("保存全部已编辑")
+            self.btn_save_actual_freight_all.clicked.connect(self._save_actual_freight_all_edited)
+
+            top_row.addWidget(self.btn_save_actual_freight_current)
+            top_row.addWidget(self.btn_save_actual_freight_all)
+
             table = QTableWidget(0, 8)
             table.setHorizontalHeaderLabels(
                 ["月份", "客户编码", "客户名称", "本月销售额(已审核)", "实际运费金额", "测算依据", "状态", "命中行数"]
             )
+            table.itemChanged.connect(self._on_actual_freight_item_changed)
         else:
             table = QTableWidget(0, 4)
             table.setHorizontalHeaderLabels(["字段1", "字段2", "字段3", "字段4"])
@@ -1048,6 +1061,121 @@ class MainWindow(QMainWindow):
         self._scroll_current_stage_to_top()
         self._refresh_ui()
 
+    def _on_actual_freight_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._is_refreshing_actual_freight_table:
+            return
+        table: QTableWidget = getattr(self, "actual_freight_table", None)
+        if table is None or item is None or table is not item.tableWidget():
+            return
+        if item.column() not in {4, 5}:
+            return
+        if item.row() < 0 or item.row() >= len(self.actual_freight_tasks):
+            return
+        self.actual_freight_edited_rows.add(item.row())
+
+    def _apply_actual_freight_row_to_task(self, row_index: int) -> tuple[bool, str]:
+        table: QTableWidget = getattr(self, "actual_freight_table", None)
+        if table is None:
+            return False, "当前维护面板未就绪。"
+        if row_index < 0 or row_index >= table.rowCount() or row_index >= len(self.actual_freight_tasks):
+            return False, "当前选中行无效，请重新选择。"
+
+        amount_item = table.item(row_index, 4)
+        basis_item = table.item(row_index, 5)
+        amount_text = "" if amount_item is None else amount_item.text().strip()
+        basis_text = "" if basis_item is None else basis_item.text().strip()
+
+        if amount_text == "":
+            return False, f"第 {row_index + 1} 行保存失败：请填写“实际运费金额”。"
+        try:
+            amount_value = float(amount_text.replace(",", ""))
+        except Exception:
+            return False, f"第 {row_index + 1} 行保存失败：“实际运费金额”必须是数字。"
+
+        if basis_text == "":
+            return False, f"第 {row_index + 1} 行保存失败：请填写“测算依据”。"
+
+        task = self.actual_freight_tasks[row_index]
+        task.actual_freight_amount = amount_value
+        task.basis = basis_text
+        task.status = "已录入"
+        return True, ""
+
+    def _save_actual_freight_current_row(self) -> None:
+        if self.current_file_path == "":
+            self._show_feedback("当前提示：请先导入原始数据，再进行按实际运费维护。")
+            return
+        table: QTableWidget = getattr(self, "actual_freight_table", None)
+        if table is None or table.rowCount() == 0:
+            self._show_feedback("当前提示：当前没有可维护的按实际运费任务。")
+            return
+
+        row_index = table.currentRow()
+        if row_index < 0:
+            self._show_feedback("当前提示：请先选中一条任务，再执行“保存当前行”。")
+            return
+
+        ok, message = self._apply_actual_freight_row_to_task(row_index)
+        if not ok:
+            self._show_feedback(message)
+            return
+
+        self.actual_freight_edited_rows.discard(row_index)
+        aft_summary = summarize_actual_freight_tasks(self.actual_freight_tasks)
+        self.task_pool["actual_freight"] = aft_summary["pending"]
+        self._show_feedback(f"当前状态：第 {row_index + 1} 行已保存，按实际运费待录入剩余 {aft_summary['pending']} 条。")
+        self._refresh_ui()
+
+    def _save_actual_freight_all_edited(self) -> None:
+        if self.current_file_path == "":
+            self._show_feedback("当前提示：请先导入原始数据，再进行按实际运费维护。")
+            return
+        table: QTableWidget = getattr(self, "actual_freight_table", None)
+        if table is None or table.rowCount() == 0:
+            self._show_feedback("当前提示：当前没有可维护的按实际运费任务。")
+            return
+
+        target_rows = sorted(idx for idx in self.actual_freight_edited_rows if 0 <= idx < table.rowCount())
+        if len(target_rows) == 0:
+            self._show_feedback("当前提示：没有检测到已编辑行，请先修改“实际运费金额”或“测算依据”。")
+            return
+
+        validated_updates: list[tuple[int, float, str]] = []
+        for row_index in target_rows:
+            amount_item = table.item(row_index, 4)
+            basis_item = table.item(row_index, 5)
+            amount_text = "" if amount_item is None else amount_item.text().strip()
+            basis_text = "" if basis_item is None else basis_item.text().strip()
+
+            if amount_text == "":
+                self._show_feedback(f"第 {row_index + 1} 行保存失败：请填写“实际运费金额”。")
+                return
+            try:
+                amount_value = float(amount_text.replace(",", ""))
+            except Exception:
+                self._show_feedback(f"第 {row_index + 1} 行保存失败：“实际运费金额”必须是数字。")
+                return
+
+            if basis_text == "":
+                self._show_feedback(f"第 {row_index + 1} 行保存失败：请填写“测算依据”。")
+                return
+
+            validated_updates.append((row_index, amount_value, basis_text))
+
+        for row_index, amount_value, basis_text in validated_updates:
+            task = self.actual_freight_tasks[row_index]
+            task.actual_freight_amount = amount_value
+            task.basis = basis_text
+            task.status = "已录入"
+
+        self.actual_freight_edited_rows.clear()
+        aft_summary = summarize_actual_freight_tasks(self.actual_freight_tasks)
+        self.task_pool["actual_freight"] = aft_summary["pending"]
+        self._show_feedback(
+            f"当前状态：已保存 {len(target_rows)} 条编辑记录，按实际运费待录入剩余 {aft_summary['pending']} 条。"
+        )
+        self._refresh_ui()
+
     def _open_recommended_task(self) -> None:
         recommendation = self._recommended_task()
         self._switch_stage(recommendation["key"])
@@ -1132,6 +1260,12 @@ class MainWindow(QMainWindow):
             button.setChecked(key == self.current_stage_key)
             button.setEnabled(self.current_file_path != "" or key == "overview")
 
+        if hasattr(self, "btn_save_actual_freight_current"):
+            has_file = self.current_file_path != ""
+            has_rows = len(self.actual_freight_tasks) > 0
+            self.btn_save_actual_freight_current.setEnabled(has_file and has_rows)
+            self.btn_save_actual_freight_all.setEnabled(has_file and has_rows)
+
         self.current_task_title.setText(recommendation["title"])
         self.current_task_reason.setText(recommendation["reason"])
         self.current_task_remaining.setText(recommendation["remaining"])
@@ -1196,7 +1330,17 @@ class MainWindow(QMainWindow):
                     task.status,
                     str(task.raw_count),
                 ])
-            self._fill_table(table, rows, 8)
+            self._is_refreshing_actual_freight_table = True
+            try:
+                self._fill_table(table, rows, 8)
+                for row_index in range(table.rowCount()):
+                    for col_index in (4, 5):
+                        item = table.item(row_index, col_index)
+                        if item is None:
+                            continue
+                        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            finally:
+                self._is_refreshing_actual_freight_table = False
             return
 
         count_label.setText(f"当前待处理：{count} 条")
