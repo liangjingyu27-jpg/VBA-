@@ -830,40 +830,23 @@ class MainWindow(QMainWindow):
         return shell
 
     def _task_pool_summary_text(self) -> str:
-        counted_items = [
-            ("排除规则", self.task_pool["exclude_rules"]),
-            ("结算条款", self.task_pool["settlement_terms"]),
-            ("自提判定", self.task_pool["self_pickup"]),
-            ("按实际运费", self.task_pool["actual_freight"]),
+        pending_counts = [
+            self.task_pool["exclude_rules"],
+            self.task_pool["settlement_terms"],
+            self.task_pool["self_pickup"],
+            self.task_pool["actual_freight"],
         ]
-        active = [(name, count) for name, count in counted_items if count > 0]
-        total_categories = len(active)
-        total_items = sum(count for _, count in active)
+        total_categories = sum(1 for count in pending_counts if count > 0)
+        total_items = sum(pending_counts)
         return f"当前待处理：{total_categories} 类 / {total_items} 条"
 
     def _compute_progress(self) -> int:
-        if self.current_batch_state == "未导入":
+        aft_summary = summarize_actual_freight_tasks(self.actual_freight_tasks)
+        total = aft_summary["total"]
+        done = aft_summary["done"]
+        if total <= 0:
             return 0
-        if self.current_batch_state in {"可导出", "已导出"}:
-            return 100
-
-        total_items = sum(self.task_pool.values())
-        base = {
-            "已导入": 12,
-            "已运行识别": 25,
-            "待维护": 35,
-            "维护中": 45,
-            "可再运行": 80,
-            "可导出": 100,
-            "已导出": 100,
-        }.get(self.current_batch_state, 0)
-
-        if self.current_batch_state in {"待维护", "维护中"}:
-            if total_items == 0:
-                return 80
-            solved_ratio = max(0.0, min(1.0, 1 - total_items / max(total_items, 24)))
-            return max(base, min(79, int(35 + solved_ratio * 40)))
-        return base
+        return int(done * 100 / total)
 
     def _current_focus_text(self) -> str:
         mapping = {
@@ -1247,8 +1230,7 @@ class MainWindow(QMainWindow):
         self.progress_current_state.set_value(self._current_focus_text())
         self.progress_task_pool.set_value(self._task_pool_summary_text())
 
-        current_index = self.batch_states.index(self.current_batch_state) + 1 if self.current_batch_state in self.batch_states else 0
-        self.progress_ratio.set_value(f"{current_index} / {len(self.batch_states)}")
+        self.progress_ratio.set_value(f"{aft_summary['done']} / {aft_summary['total']}")
         self.progress_bar.setValue(self.total_progress_value)
         self.progress_bar.setFormat(f"{self.total_progress_value}%")
 
@@ -1277,7 +1259,7 @@ class MainWindow(QMainWindow):
         )
         self.overview_state_summary.set_value(overview_state_text)
         self.overview_task_pool_summary.set_value(
-            f"{self._task_pool_summary_text()}｜A3总数：{aft_summary['total']}｜A3已录入：{aft_summary['done']}"
+            f"当前待处理 {aft_summary['pending']} 条 | 已录入 {aft_summary['done']} 条 | A3总数 {aft_summary['total']} 条"
         )
         self.overview_run_summary.set_value(self.last_run_summary)
         export_text = "当前门禁已通过，可进入导出结果。" if self.gate_state == "已通过" else "当前尚未满足导出条件。"
