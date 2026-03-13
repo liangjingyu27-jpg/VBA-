@@ -852,7 +852,8 @@ class MainWindow(QMainWindow):
             return max(base, min(79, int(35 + solved_ratio * 40)))
         return base
 
-    def _current_focus_text(self) -> str:
+    def _current_focus_text(self, preferred_key: str | None = None) -> str:
+        key = preferred_key or self._recommended_task().get("key", "overview")
         mapping = {
             "overview": "当前焦点：批次总览",
             "exclude_rules": "当前焦点：排除规则维护",
@@ -862,7 +863,7 @@ class MainWindow(QMainWindow):
             "run_check": "当前焦点：运行与校验",
             "export": "当前焦点：导出结果",
         }
-        return mapping.get(self.current_stage_key, "当前焦点：批次总览")
+        return mapping.get(key, "当前焦点：批次总览")
 
     def _recommended_task(self) -> dict[str, str]:
         if self.current_file_path == "":
@@ -1116,7 +1117,7 @@ class MainWindow(QMainWindow):
         self.info_batch_state.set_value(self.current_batch_state)
         self.info_gate_state.set_value(self.gate_state)
         self.info_last_run.set_value(self.last_run_summary)
-        self.progress_current_state.set_value(self._current_focus_text())
+        self.progress_current_state.set_value(self._current_focus_text(recommendation["key"]))
         self.progress_task_pool.set_value(self._task_pool_summary_text())
 
         current_index = self.batch_states.index(self.current_batch_state) + 1 if self.current_batch_state in self.batch_states else 0
