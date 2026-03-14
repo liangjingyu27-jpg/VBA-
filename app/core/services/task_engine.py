@@ -446,3 +446,53 @@ def summarize_actual_freight_tasks(tasks: list[ActualFreightTask]) -> dict[str, 
         "done": done,
         "pending": pending,
     }
+
+
+def build_settlement_term_tasks_from_raw_rows(
+    raw_rows: list[dict[str, Any]],
+    term_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not raw_rows:
+        return []
+
+    run_month = detect_run_month_from_raw_rows(raw_rows)
+    terms = load_terms_from_rows(term_rows, run_month)
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for raw_index, row in enumerate(raw_rows, start=2):
+        doc_no = s(pick_first(row, ["单据编号"]))
+        if not doc_no:
+            continue
+
+        status = s(pick_first(row, ["单据状态"]))
+        if norm(status) != "已审核":
+            continue
+
+        customer_code = s(pick_first(row, ["客户编码"]))
+        if customer_code == "":
+            continue
+        if customer_code in terms:
+            continue
+
+        customer_name = s(pick_first(row, ["收货客户"]))
+        task = grouped.get(customer_code)
+        if task is None:
+            grouped[customer_code] = {
+                "task_id": f"ST-{customer_code}",
+                "customer_code": customer_code,
+                "customer_name": customer_name,
+                "sample_doc_no": doc_no,
+                "raw_count": 1,
+                "reason": "客户缺少有效结算条款",
+                "status": "待处理",
+                "first_raw_row": raw_index,
+            }
+            continue
+
+        task["raw_count"] = int(task.get("raw_count", 0)) + 1
+        if s(task.get("customer_name")) == "" and customer_name:
+            task["customer_name"] = customer_name
+
+    tasks = list(grouped.values())
+    tasks.sort(key=lambda item: (s(item.get("customer_name")), s(item.get("customer_code"))))
+    return tasks
