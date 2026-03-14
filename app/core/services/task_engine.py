@@ -446,3 +446,101 @@ def summarize_actual_freight_tasks(tasks: list[ActualFreightTask]) -> dict[str, 
         "done": done,
         "pending": pending,
     }
+
+
+def build_exclude_rule_tasks_from_raw_rows(
+    raw_rows: list[dict[str, Any]],
+    rule_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not raw_rows:
+        return []
+
+    run_month = detect_run_month_from_raw_rows(raw_rows)
+    rules = load_rules_from_rows(rule_rows, run_month)
+
+    tasks: list[dict[str, Any]] = []
+    for raw_index, row in enumerate(raw_rows, start=2):
+        doc_no = s(pick_first(row, ["单据编号"]))
+        if not doc_no:
+            continue
+
+        status = s(pick_first(row, ["单据状态"]))
+        if norm(status) != "已审核":
+            continue
+
+        line = s(pick_first(row, ["运输线路"]))
+        mode = s(pick_first(row, ["运输方式"]))
+        addr = s(pick_first(row, ["收货渠道地址"]))
+        remark = s(pick_first(row, ["备注"]))
+
+        raw_scan_all_blank = (norm(line) == "" and norm(mode) == "" and norm(addr) == "" and norm(remark) == "")
+        if raw_scan_all_blank:
+            continue
+
+        rule_action, hit_rule, hit_field = eval_rules(rules, line, mode, addr, remark)
+        if rule_action != "待确认":
+            continue
+
+        tasks.append(
+            {
+                "task_id": f"ER-{raw_index}-{doc_no}",
+                "raw_row": raw_index,
+                "doc_no": doc_no,
+                "customer_code": s(pick_first(row, ["客户编码"])),
+                "customer_name": s(pick_first(row, ["收货客户"])),
+                "hit_field": hit_field or "未命中字段",
+                "hit_keyword": "" if hit_rule is None else hit_rule.keyword,
+                "status": "待处理",
+            }
+        )
+
+    return tasks
+
+
+def build_settlement_term_tasks_from_raw_rows(
+    raw_rows: list[dict[str, Any]],
+    term_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not raw_rows:
+        return []
+
+    run_month = detect_run_month_from_raw_rows(raw_rows)
+    terms = load_terms_from_rows(term_rows, run_month)
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for raw_index, row in enumerate(raw_rows, start=2):
+        doc_no = s(pick_first(row, ["单据编号"]))
+        if not doc_no:
+            continue
+
+        status = s(pick_first(row, ["单据状态"]))
+        if norm(status) != "已审核":
+            continue
+
+        customer_code = s(pick_first(row, ["客户编码"]))
+        if customer_code == "":
+            continue
+        if customer_code in terms:
+            continue
+
+        customer_name = s(pick_first(row, ["收货客户"]))
+        key = customer_code
+        if key not in grouped:
+            grouped[key] = {
+                "task_id": f"ST-{customer_code}",
+                "customer_code": customer_code,
+                "customer_name": customer_name,
+                "sample_doc_no": doc_no,
+                "raw_count": 1,
+                "first_raw_row": raw_index,
+                "reason": "客户缺少有效结算条款",
+                "status": "待处理",
+            }
+        else:
+            grouped[key]["raw_count"] = int(grouped[key]["raw_count"]) + 1
+            if not str(grouped[key].get("customer_name") or "") and customer_name:
+                grouped[key]["customer_name"] = customer_name
+
+    tasks = list(grouped.values())
+    tasks.sort(key=lambda item: (str(item.get("customer_name") or ""), str(item.get("customer_code") or "")))
+    return tasks
