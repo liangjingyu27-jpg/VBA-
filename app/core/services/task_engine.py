@@ -495,3 +495,79 @@ def build_exclude_rule_tasks_from_raw_rows(
         )
 
     return tasks
+
+
+def build_settlement_term_tasks_from_raw_rows(
+    raw_rows: list[dict[str, Any]],
+    term_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not raw_rows:
+        return []
+
+    run_month = detect_run_month_from_raw_rows(raw_rows)
+    terms = load_terms_from_rows(term_rows, run_month)
+
+    grouped: dict[str, dict[str, Any]] = {}
+    row_level_tasks: list[dict[str, Any]] = []
+
+    for raw_index, row in enumerate(raw_rows, start=2):
+        doc_no = s(pick_first(row, ["单据编号"]))
+        if not doc_no:
+            continue
+
+        status = s(pick_first(row, ["单据状态"]))
+        if norm(status) != "已审核":
+            continue
+
+        customer_code = s(pick_first(row, ["客户编码"]))
+        customer_name = s(pick_first(row, ["收货客户"]))
+        has_term = customer_code != "" and customer_code in terms
+        if has_term:
+            continue
+
+        if customer_code == "":
+            row_level_tasks.append(
+                {
+                    "task_id": f"ST-ROW-{raw_index}-{doc_no}",
+                    "raw_row": raw_index,
+                    "doc_no": doc_no,
+                    "customer_code": "[缺失客户编码]",
+                    "customer_name": customer_name,
+                    "reason": "源数据缺失客户编码，无法匹配结算条款",
+                    "status": "待处理",
+                }
+            )
+            continue
+
+        group_key = customer_code
+        existing = grouped.get(group_key)
+        if existing is None:
+            grouped[group_key] = {
+                "task_id": f"ST-{run_month or 'NA'}-{customer_code}",
+                "raw_row": raw_index,
+                "doc_no": doc_no,
+                "customer_code": customer_code,
+                "customer_name": customer_name,
+                "reason": "当前客户未匹配到有效结算条款",
+                "status": "待处理",
+                "raw_count": 1,
+            }
+        else:
+            existing["raw_count"] = int(existing.get("raw_count", 1)) + 1
+            if s(existing.get("customer_name")) == "" and customer_name != "":
+                existing["customer_name"] = customer_name
+
+    tasks = list(grouped.values()) + row_level_tasks
+    tasks.sort(key=lambda x: (str(x.get("customer_code") == "[缺失客户编码]"), str(x.get("customer_code")), str(x.get("task_id"))))
+    return tasks
+
+
+def summarize_settlement_term_tasks(tasks: list[dict[str, Any]]) -> dict[str, int]:
+    total = len(tasks)
+    done = sum(1 for task in tasks if str(task.get("status")) == "已处理")
+    pending = total - done
+    return {
+        "total": total,
+        "done": done,
+        "pending": pending,
+    }
