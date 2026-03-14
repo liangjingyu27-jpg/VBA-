@@ -446,3 +446,42 @@ def summarize_actual_freight_tasks(tasks: list[ActualFreightTask]) -> dict[str, 
         "done": done,
         "pending": pending,
     }
+
+
+def build_exclude_rule_tasks_from_rows(rule_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+
+    for row_no, row in enumerate(rule_rows, start=3):
+        enabled = norm(pick_first(row, ["是否启用", "启用", "启用(Y/N)"])) == "y"
+        keyword = s(pick_first(row, ["关键词", "关键字"]))
+        if not (enabled and keyword):
+            continue
+
+        scope = s(pick_first(row, ["范围", "作用范围", "字段范围", "扫描范围"])) or "全部"
+        action = s(pick_first(row, ["动作", "处理动作"])) or "待确认"
+        status_raw = s(pick_first(row, ["维护状态", "处理状态", "状态"]))
+        status = "已处理" if status_raw in {"已处理", "完成", "已完成"} else "待处理"
+
+        tasks.append(
+            {
+                "row_no": row_no,
+                "keyword": keyword,
+                "scope": scope,
+                "action": action,
+                "status": status,
+            }
+        )
+
+    tasks.sort(key=lambda x: (x["status"] == "已处理", x["keyword"], x["row_no"]))
+    return tasks
+
+
+def summarize_exclude_rule_tasks(tasks: list[dict[str, Any]]) -> dict[str, int]:
+    total = len(tasks)
+    done = sum(1 for x in tasks if s(x.get("status")) == "已处理")
+    pending = total - done
+    return {
+        "total": total,
+        "done": done,
+        "pending": pending,
+    }

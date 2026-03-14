@@ -34,7 +34,9 @@ from app.core.services.excel_service import (
 )
 from app.core.services.task_engine import (
     build_actual_freight_tasks_from_raw_rows,
+    build_exclude_rule_tasks_from_rows,
     summarize_actual_freight_tasks,
+    summarize_exclude_rule_tasks,
 )
 
 
@@ -230,6 +232,7 @@ class MainWindow(QMainWindow):
         }
 
         self.actual_freight_tasks = []
+        self.exclude_rule_tasks: list[dict[str, str | int]] = []
 
         self.batch_states = [
             "已导入",
@@ -709,7 +712,15 @@ class MainWindow(QMainWindow):
         top_row.addWidget(btn_clear)
         layout.addLayout(top_row)
 
-        if stage_key == "actual_freight":
+        if stage_key == "exclude_rules":
+            self.btn_mark_exclude_rule_current = QPushButton("标记当前行已处理")
+            self.btn_mark_exclude_rule_current.setObjectName("PrimaryButton")
+            self.btn_mark_exclude_rule_current.clicked.connect(self._mark_exclude_rule_current_row_handled)
+            top_row.addWidget(self.btn_mark_exclude_rule_current)
+
+            table = QTableWidget(0, 6)
+            table.setHorizontalHeaderLabels(["源行号", "关键词", "范围", "动作", "状态", "说明"])
+        elif stage_key == "actual_freight":
             table = QTableWidget(0, 8)
             table.setHorizontalHeaderLabels(
                 ["月份", "客户编码", "客户名称", "本月销售额(已审核)", "实际运费金额", "测算依据", "状态", "命中行数"]
@@ -992,11 +1003,13 @@ class MainWindow(QMainWindow):
                 self_pickup_rows=self_pickup_rows,
                 actual_freight_rows=actual_freight_rows,
             )
+            self.exclude_rule_tasks = build_exclude_rule_tasks_from_rows(rule_rows)
 
             aft_summary = summarize_actual_freight_tasks(self.actual_freight_tasks)
+            exclude_summary = summarize_exclude_rule_tasks(self.exclude_rule_tasks)
 
             self.task_pool = {
-                "exclude_rules": 0,
+                "exclude_rules": exclude_summary["pending"],
                 "settlement_terms": 0,
                 "self_pickup": 0,
                 "actual_freight": aft_summary["pending"],
@@ -1034,6 +1047,8 @@ class MainWindow(QMainWindow):
 
         except Exception as exc:
             self.actual_freight_tasks = []
+            self.exclude_rule_tasks = []
+            self.task_pool["exclude_rules"] = 0
             self.task_pool["actual_freight"] = 0
             self.current_batch_state = "未导入"
             self.gate_state = "未通过"
@@ -1046,6 +1061,32 @@ class MainWindow(QMainWindow):
         self.current_stage_key = key
         self.stage_stack.setCurrentIndex(self.stage_index[key])
         self._scroll_current_stage_to_top()
+        self._refresh_ui()
+
+    def _mark_exclude_rule_current_row_handled(self) -> None:
+        if self.current_file_path == "":
+            self._show_feedback("当前提示：请先导入原始数据，再进行排除规则维护。")
+            return
+
+        table: QTableWidget = getattr(self, "exclude_rules_table")
+        if table.rowCount() == 0 or len(self.exclude_rule_tasks) == 0:
+            self._show_feedback("当前提示：当前没有可维护的排除规则。")
+            return
+
+        row_index = table.currentRow()
+        if row_index < 0 or row_index >= len(self.exclude_rule_tasks):
+            self._show_feedback("当前提示：请先选中一条排除规则，再执行处理。")
+            return
+
+        task = self.exclude_rule_tasks[row_index]
+        if str(task.get("status", "")) == "已处理":
+            self._show_feedback("当前提示：该排除规则已处理，无需重复操作。")
+            return
+
+        task["status"] = "已处理"
+        summary = summarize_exclude_rule_tasks(self.exclude_rule_tasks)
+        self.task_pool["exclude_rules"] = summary["pending"]
+        self._show_feedback(f"当前状态：排除规则已处理，剩余待处理 {summary['pending']} 条。")
         self._refresh_ui()
 
     def _open_recommended_task(self) -> None:
@@ -1132,6 +1173,11 @@ class MainWindow(QMainWindow):
             button.setChecked(key == self.current_stage_key)
             button.setEnabled(self.current_file_path != "" or key == "overview")
 
+        if hasattr(self, "btn_mark_exclude_rule_current"):
+            self.btn_mark_exclude_rule_current.setEnabled(
+                self.current_file_path != "" and len(self.exclude_rule_tasks) > 0
+            )
+
         self.current_task_title.setText(recommendation["title"])
         self.current_task_reason.setText(recommendation["reason"])
         self.current_task_remaining.setText(recommendation["remaining"])
@@ -1177,6 +1223,30 @@ class MainWindow(QMainWindow):
         count = self.task_pool[key]
         count_label: QLabel = getattr(self, f"{key}_count_label")
         table: QTableWidget = getattr(self, f"{key}_table")
+
+        if key == "exclude_rules":
+            summary = summarize_exclude_rule_tasks(self.exclude_rule_tasks)
+            self.task_pool["exclude_rules"] = summary["pending"]
+            count_label.setText(
+                f"当前待处理：{summary['pending']} 条｜已处理：{summary['done']} 条｜总数：{summary['total']} 条"
+            )
+            rows = []
+            if summary["total"] == 0:
+                rows.append(["-", "当前批次未识别到待维护排除规则", "", "", "空状态", "可直接进入下一维护分类"])
+            else:
+                for task in self.exclude_rule_tasks:
+                    status_text = str(task.get("status", "待处理"))
+                    note = "待处理" if status_text != "已处理" else "已完成"
+                    rows.append([
+                        str(task.get("row_no", "")),
+                        str(task.get("keyword", "")),
+                        str(task.get("scope", "")),
+                        str(task.get("action", "")),
+                        status_text,
+                        note,
+                    ])
+            self._fill_table(table, rows, 6)
+            return
 
         if key == "actual_freight":
             aft_summary = summarize_actual_freight_tasks(self.actual_freight_tasks)
