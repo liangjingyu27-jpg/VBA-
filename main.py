@@ -1377,16 +1377,18 @@ class MainWindow(QMainWindow):
         self.current_settlement_term_task_id = task_id
         self._set_settlement_term_form_values(build_form_defaults(target_task))
 
-    def _save_settlement_term_current(self) -> bool:
+    def _save_settlement_term_current(self, task_id: str | None = None, refresh: bool = True) -> bool:
         if self.current_file_path == "":
             self._show_feedback("当前提示：请先导入原始数据，再进行结算条款维护。")
             return False
-        if self.current_settlement_term_task_id == "":
+
+        target_task_id = (task_id or self.current_settlement_term_task_id).strip()
+        if target_task_id == "":
             self._show_feedback("当前提示：请先在任务列表中选中一个客户。")
             return False
 
         target_task = next(
-            (task for task in self.settlement_term_tasks if str(task.get("task_id")) == self.current_settlement_term_task_id),
+            (task for task in self.settlement_term_tasks if str(task.get("task_id")) == target_task_id),
             None,
         )
         if target_task is None:
@@ -1399,7 +1401,7 @@ class MainWindow(QMainWindow):
             return False
 
         target_task["maintain_payload"] = payload
-        saved_ok = upsert_settlement_term_result(self.settlement_term_results, self.current_settlement_term_task_id, payload)
+        saved_ok = upsert_settlement_term_result(self.settlement_term_results, target_task_id, payload)
         if not saved_ok:
             self._show_feedback("当前卡点：维护值写入结果层失败，请重试。")
             return False
@@ -1407,18 +1409,23 @@ class MainWindow(QMainWindow):
         if str(target_task.get("status")) != "已处理":
             target_task["status"] = "待处理"
 
+        self.current_settlement_term_task_id = target_task_id
         self._show_feedback(f"当前状态：客户 {payload['customer_code']} 维护值已保存。")
-        self._refresh_ui()
+        if refresh:
+            self._refresh_ui()
         return True
 
     def _save_and_mark_settlement_term_done(self) -> None:
-        if not self._save_settlement_term_current():
+        frozen_task_id = self.current_settlement_term_task_id.strip()
+        if frozen_task_id == "":
+            self._show_feedback("当前提示：请先在任务列表中选中一个客户。")
             return
-        if self.current_settlement_term_task_id == "":
+
+        if not self._save_settlement_term_current(task_id=frozen_task_id, refresh=False):
             return
 
         target_task = next(
-            (task for task in self.settlement_term_tasks if str(task.get("task_id")) == self.current_settlement_term_task_id),
+            (task for task in self.settlement_term_tasks if str(task.get("task_id")) == frozen_task_id),
             None,
         )
         if target_task is None:
@@ -1426,13 +1433,14 @@ class MainWindow(QMainWindow):
 
         can_done, reason = can_mark_settlement_term_done(
             target_task,
-            payload_written=self.current_settlement_term_task_id in self.settlement_term_results,
+            payload_written=frozen_task_id in self.settlement_term_results,
         )
         if not can_done:
             self._show_feedback(f"当前卡点：{reason}")
             return
 
         target_task["status"] = "已处理"
+        self.current_settlement_term_task_id = frozen_task_id
         summary = self._summarize_settlement_term_tasks()
         self.task_pool["settlement_terms"] = summary["pending"]
         payload = target_task.get("maintain_payload") if isinstance(target_task.get("maintain_payload"), dict) else {}
@@ -1655,6 +1663,7 @@ class MainWindow(QMainWindow):
             if len(self.settlement_term_tasks) == 0:
                 rows = [["-", "-", "-", "当前无待维护结算条款", "-", "空状态"]]
                 self.settlement_terms_visible_task_ids.append("")
+                self.current_settlement_term_task_id = ""
             else:
                 rows = []
                 for task in self.settlement_term_tasks:
@@ -1673,18 +1682,49 @@ class MainWindow(QMainWindow):
                     )
             self._fill_table(table, rows, 6)
             if len(self.settlement_term_tasks) > 0:
+                next_pending_task = next(
+                    (task for task in self.settlement_term_tasks if str(task.get("status") or "") != "已处理"),
+                    None,
+                )
                 if self.current_settlement_term_task_id == "":
+                    if next_pending_task is not None:
+                        self.current_settlement_term_task_id = str(next_pending_task.get("task_id") or "")
+                    else:
+                        self.current_settlement_term_task_id = self.settlement_terms_visible_task_ids[0]
+
+                current_task = next(
+                    (
+                        task
+                        for task in self.settlement_term_tasks
+                        if str(task.get("task_id") or "") == self.current_settlement_term_task_id
+                    ),
+                    None,
+                )
+                if current_task is not None and str(current_task.get("status") or "") == "已处理" and next_pending_task is not None:
+                    self.current_settlement_term_task_id = str(next_pending_task.get("task_id") or "")
+
+                target_task = next(
+                    (
+                        task
+                        for task in self.settlement_term_tasks
+                        if str(task.get("task_id") or "") == self.current_settlement_term_task_id
+                    ),
+                    None,
+                )
+                if target_task is None and len(self.settlement_terms_visible_task_ids) > 0:
                     self.current_settlement_term_task_id = self.settlement_terms_visible_task_ids[0]
                     target_task = next(
                         (
                             task
                             for task in self.settlement_term_tasks
-                            if str(task.get("task_id")) == self.current_settlement_term_task_id
+                            if str(task.get("task_id") or "") == self.current_settlement_term_task_id
                         ),
                         None,
                     )
-                    if target_task is not None:
-                        self._set_settlement_term_form_values(build_form_defaults(target_task))
+
+                if target_task is not None:
+                    self._set_settlement_term_form_values(build_form_defaults(target_task))
+
                 target_index = 0
                 if self.current_settlement_term_task_id in self.settlement_terms_visible_task_ids:
                     target_index = self.settlement_terms_visible_task_ids.index(self.current_settlement_term_task_id)
