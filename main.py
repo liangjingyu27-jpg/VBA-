@@ -772,12 +772,21 @@ class MainWindow(QMainWindow):
             table.setHorizontalHeaderLabels(["字段1", "字段2", "字段3", "字段4"])
 
         table.verticalHeader().setVisible(False)
-        table.setMinimumHeight(420)
+        if stage_key == "settlement_terms":
+            table.setMinimumHeight(260)
+        else:
+            table.setMinimumHeight(420)
         setattr(self, f"{stage_key}_table", table)
-        layout.addWidget(table)
 
         if stage_key == "settlement_terms":
-            layout.addWidget(self._build_settlement_term_form())
+            form_title = QLabel("结算条款填写区")
+            form_title.setObjectName("PanelTitle")
+            layout.addWidget(form_title)
+            self.settlement_terms_form = self._build_settlement_term_form()
+            self.settlement_terms_form.setVisible(True)
+            layout.addWidget(self.settlement_terms_form)
+
+        layout.addWidget(table)
 
         layout.addStretch()
         return shell
