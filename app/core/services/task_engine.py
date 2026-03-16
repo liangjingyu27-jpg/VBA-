@@ -480,6 +480,7 @@ def build_exclude_rule_tasks_from_raw_rows(
     rules = load_rules_from_rows(rule_rows, run_month)
 
     tasks: list[dict[str, Any]] = []
+    scope_map = {"运输线路": "运输线路", "运输方式": "运输方式", "收货渠道地址": "收货渠道地址", "备注": "备注"}
     for raw_index, row in enumerate(raw_rows, start=2):
         doc_no = s(pick_first(row, ["单据编号"]))
         if not doc_no:
@@ -511,6 +512,16 @@ def build_exclude_rule_tasks_from_raw_rows(
                 "customer_name": s(pick_first(row, ["收货客户"])),
                 "hit_field": hit_field or "未命中字段",
                 "hit_keyword": "" if hit_rule is None else hit_rule.keyword,
+                "reason": "命中待确认规则，需维护候选规则",
+                "line": line,
+                "mode": mode,
+                "addr": addr,
+                "remark": remark,
+                "candidate_scope": scope_map.get(hit_field, "全部"),
+                "candidate_action": "排除",
+                "candidate_keyword": "" if hit_rule is None else hit_rule.keyword,
+                "candidate_remark": f"来源单据 {doc_no}，源行 {raw_index}",
+                "saved": False,
                 "status": "待处理",
             }
         )
