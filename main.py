@@ -6,10 +6,12 @@ from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QLineEdit,
     QLabel,
     QLayout,
     QLayoutItem,
@@ -31,11 +33,18 @@ from app.core.services.excel_service import (
     find_sheet_by_keywords,
     open_excel_with_source,
     sheet_to_dict_rows,
+    upsert_settlement_term_result,
+)
+from app.core.services.settlement_terms_service import (
+    SETTLEMENT_TYPES,
+    build_form_defaults,
+    build_payload,
 )
 from app.core.services.task_engine import (
     build_exclude_rule_tasks_from_raw_rows,
     build_actual_freight_tasks_from_raw_rows,
     build_settlement_term_tasks_from_raw_rows,
+    can_mark_settlement_term_done,
     summarize_actual_freight_tasks,
     summarize_settlement_term_tasks,
 )
@@ -237,6 +246,10 @@ class MainWindow(QMainWindow):
         self._is_refreshing_actual_freight_table = False
         self.exclude_rule_tasks: list[dict[str, str | int]] = []
         self.settlement_term_tasks: list[dict[str, str | int]] = []
+        self.settlement_term_results: dict[str, dict[str, str]] = {}
+        self.settlement_terms_visible_task_ids: list[str] = []
+        self.current_settlement_term_task_id = ""
+        self._settlement_terms_syncing_form = False
 
         self.batch_states = [
             "已导入",
@@ -725,13 +738,19 @@ class MainWindow(QMainWindow):
             table = QTableWidget(0, 7)
             table.setHorizontalHeaderLabels(["任务ID", "源行", "单据编号", "客户编码", "客户名称", "命中信息", "状态"])
         elif stage_key == "settlement_terms":
-            self.btn_mark_settlement_term_current = QPushButton("标记当前行已处理")
-            self.btn_mark_settlement_term_current.setObjectName("PrimaryButton")
-            self.btn_mark_settlement_term_current.clicked.connect(self._mark_settlement_term_current_done)
-            top_row.addWidget(self.btn_mark_settlement_term_current)
+            self.btn_save_settlement_term_current = QPushButton("保存当前客户")
+            self.btn_save_settlement_term_current.setObjectName("PrimaryButton")
+            self.btn_save_settlement_term_current.clicked.connect(self._save_settlement_term_current)
+            top_row.addWidget(self.btn_save_settlement_term_current)
 
-            table = QTableWidget(0, 7)
-            table.setHorizontalHeaderLabels(["任务ID", "源行", "单据编号", "客户编码", "客户名称", "待维护原因", "状态"])
+            self.btn_save_settlement_term_done = QPushButton("保存并标记已处理")
+            self.btn_save_settlement_term_done.setObjectName("PrimaryButton")
+            self.btn_save_settlement_term_done.clicked.connect(self._save_and_mark_settlement_term_done)
+            top_row.addWidget(self.btn_save_settlement_term_done)
+
+            table = QTableWidget(0, 6)
+            table.setHorizontalHeaderLabels(["客户编码", "客户名称", "样本单据号", "待维护原因", "涉及行数", "状态"])
+            table.itemSelectionChanged.connect(self._on_settlement_term_table_selection_changed)
         elif stage_key == "actual_freight":
             self.btn_save_actual_freight_current = QPushButton("保存当前行")
             self.btn_save_actual_freight_current.setObjectName("PrimaryButton")
@@ -756,8 +775,56 @@ class MainWindow(QMainWindow):
         table.setMinimumHeight(420)
         setattr(self, f"{stage_key}_table", table)
         layout.addWidget(table)
+
+        if stage_key == "settlement_terms":
+            layout.addWidget(self._build_settlement_term_form())
+
         layout.addStretch()
         return shell
+
+    def _build_settlement_term_form(self) -> QWidget:
+        box = QFrame()
+        box.setObjectName("PanelShell")
+        layout = QGridLayout(box)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
+
+        self.st_enabled = QComboBox()
+        self.st_enabled.addItems(["Y", "N"])
+        self.st_customer_code = QLineEdit()
+        self.st_customer_name = QLineEdit()
+        self.st_settle_type = QComboBox()
+        self.st_settle_type.addItems(SETTLEMENT_TYPES)
+        self.st_ratio = QLineEdit()
+        self.st_fixed_amount = QLineEdit()
+        self.st_no_charge_reason = QLineEdit()
+        self.st_remark = QLineEdit()
+        self.st_start_month = QLineEdit()
+        self.st_end_month = QLineEdit()
+
+        fields = [
+            ("是否启用", self.st_enabled),
+            ("客户编码", self.st_customer_code),
+            ("客户名称（可选）", self.st_customer_name),
+            ("结算类型", self.st_settle_type),
+            ("费比", self.st_ratio),
+            ("固定金额", self.st_fixed_amount),
+            ("不计费原因", self.st_no_charge_reason),
+            ("备注", self.st_remark),
+            ("生效月份", self.st_start_month),
+            ("失效月份", self.st_end_month),
+        ]
+
+        for idx, (label_text, widget) in enumerate(fields):
+            row = idx // 2
+            col = (idx % 2) * 2
+            layout.addWidget(QLabel(label_text), row, col)
+            layout.addWidget(widget, row, col + 1)
+
+        self.st_settle_type.currentTextChanged.connect(self._update_settlement_term_field_states)
+        self._update_settlement_term_field_states()
+        return box
 
     def _build_run_check_stage(self) -> QWidget:
         shell = QFrame()
@@ -989,6 +1056,8 @@ class MainWindow(QMainWindow):
             self.source_rows = result.source_rows
             self.source_cols = result.source_cols
             self.source_preview_rows = result.preview_rows
+            self.settlement_term_results = {}
+            self.current_settlement_term_task_id = ""
 
             raw_sheet = workbook[result.source_sheet_name]
             raw_rows = sheet_to_dict_rows(raw_sheet, header_row=1)
@@ -1244,39 +1313,123 @@ class MainWindow(QMainWindow):
         self._show_feedback(f"当前状态：排除规则任务 {task_id} 已处理，剩余待处理 {summary['pending']} 条。")
         self._refresh_ui()
 
-    def _mark_settlement_term_current_done(self) -> None:
-        if self.current_file_path == "":
-            self._show_feedback("当前提示：请先导入原始数据，再进行结算条款维护。")
-            return
+    def _collect_settlement_term_form_values(self) -> dict[str, str]:
+        return {
+            "enabled": self.st_enabled.currentText().strip(),
+            "customer_code": self.st_customer_code.text().strip(),
+            "customer_name": self.st_customer_name.text().strip(),
+            "settle_type": self.st_settle_type.currentText().strip(),
+            "ratio": self.st_ratio.text().strip(),
+            "fixed_amount": self.st_fixed_amount.text().strip(),
+            "no_charge_reason": self.st_no_charge_reason.text().strip(),
+            "remark": self.st_remark.text().strip(),
+            "start_month": self.st_start_month.text().strip(),
+            "end_month": self.st_end_month.text().strip(),
+        }
+
+    def _update_settlement_term_field_states(self) -> None:
+        settle_type = self.st_settle_type.currentText().strip()
+        self.st_ratio.setEnabled(settle_type == "费比")
+        self.st_fixed_amount.setEnabled(settle_type == "固定金额")
+        self.st_no_charge_reason.setEnabled(settle_type == "不计费")
+
+    def _set_settlement_term_form_values(self, values: dict[str, str]) -> None:
+        self._settlement_terms_syncing_form = True
+        try:
+            self.st_enabled.setCurrentText(str(values.get("enabled", "Y") or "Y"))
+            self.st_customer_code.setText(str(values.get("customer_code", "")))
+            self.st_customer_name.setText(str(values.get("customer_name", "")))
+            self.st_settle_type.setCurrentText(str(values.get("settle_type", "按实际") or "按实际"))
+            self.st_ratio.setText(str(values.get("ratio", "")))
+            self.st_fixed_amount.setText(str(values.get("fixed_amount", "")))
+            self.st_no_charge_reason.setText(str(values.get("no_charge_reason", "")))
+            self.st_remark.setText(str(values.get("remark", "")))
+            self.st_start_month.setText(str(values.get("start_month", "")))
+            self.st_end_month.setText(str(values.get("end_month", "")))
+            self._update_settlement_term_field_states()
+        finally:
+            self._settlement_terms_syncing_form = False
+
+    def _on_settlement_term_table_selection_changed(self) -> None:
         table: QTableWidget = getattr(self, "settlement_terms_table", None)
-        if table is None or table.rowCount() == 0:
-            self._show_feedback("当前提示：当前没有待维护的结算条款任务。")
+        if table is None:
             return
-
         row_index = table.currentRow()
-        if row_index < 0 or row_index >= table.rowCount():
-            self._show_feedback("当前提示：请先选中一条任务，再执行“标记当前行已处理”。")
+        if row_index < 0 or row_index >= len(self.settlement_terms_visible_task_ids):
             return
-
-        task_id_item = table.item(row_index, 0)
-        task_id = "" if task_id_item is None else task_id_item.text().strip()
-        if task_id == "" or task_id == "EMPTY":
-            self._show_feedback("当前提示：当前行不是可处理任务。")
+        task_id = self.settlement_terms_visible_task_ids[row_index]
+        if task_id == "":
             return
 
         target_task = next((task for task in self.settlement_term_tasks if str(task.get("task_id")) == task_id), None)
         if target_task is None:
-            self._show_feedback("当前提示：未找到对应任务，请刷新后重试。")
             return
 
-        if target_task.get("status") == "已处理":
-            self._show_feedback("当前提示：当前行已是“已处理”状态。")
+        self.current_settlement_term_task_id = task_id
+        self._set_settlement_term_form_values(build_form_defaults(target_task))
+
+    def _save_settlement_term_current(self) -> bool:
+        if self.current_file_path == "":
+            self._show_feedback("当前提示：请先导入原始数据，再进行结算条款维护。")
+            return False
+        if self.current_settlement_term_task_id == "":
+            self._show_feedback("当前提示：请先在任务列表中选中一个客户。")
+            return False
+
+        target_task = next(
+            (task for task in self.settlement_term_tasks if str(task.get("task_id")) == self.current_settlement_term_task_id),
+            None,
+        )
+        if target_task is None:
+            self._show_feedback("当前提示：未找到对应任务，请刷新后重试。")
+            return False
+
+        payload, errors = build_payload(self._collect_settlement_term_form_values())
+        if errors:
+            self._show_feedback(f"当前卡点：请完善必填字段（{'、'.join(errors)}）后再保存。")
+            return False
+
+        target_task["maintain_payload"] = payload
+        saved_ok = upsert_settlement_term_result(self.settlement_term_results, self.current_settlement_term_task_id, payload)
+        if not saved_ok:
+            self._show_feedback("当前卡点：维护值写入结果层失败，请重试。")
+            return False
+        target_task["saved"] = True
+        if str(target_task.get("status")) != "已处理":
+            target_task["status"] = "待处理"
+
+        self._show_feedback(f"当前状态：客户 {payload['customer_code']} 维护值已保存。")
+        self._refresh_ui()
+        return True
+
+    def _save_and_mark_settlement_term_done(self) -> None:
+        if not self._save_settlement_term_current():
+            return
+        if self.current_settlement_term_task_id == "":
+            return
+
+        target_task = next(
+            (task for task in self.settlement_term_tasks if str(task.get("task_id")) == self.current_settlement_term_task_id),
+            None,
+        )
+        if target_task is None:
+            return
+
+        can_done, reason = can_mark_settlement_term_done(
+            target_task,
+            payload_written=self.current_settlement_term_task_id in self.settlement_term_results,
+        )
+        if not can_done:
+            self._show_feedback(f"当前卡点：{reason}")
             return
 
         target_task["status"] = "已处理"
         summary = self._summarize_settlement_term_tasks()
         self.task_pool["settlement_terms"] = summary["pending"]
-        self._show_feedback(f"当前状态：结算条款任务 {task_id} 已处理，剩余待处理 {summary['pending']} 条。")
+        payload = target_task.get("maintain_payload") if isinstance(target_task.get("maintain_payload"), dict) else {}
+        self._show_feedback(
+            f"当前状态：客户 {payload.get('customer_code', '')} 已保存并标记已处理，剩余待处理 {summary['pending']} 条。"
+        )
         self._refresh_ui()
 
     def _scroll_current_stage_to_top(self) -> None:
@@ -1374,6 +1527,12 @@ class MainWindow(QMainWindow):
             has_file = self.current_file_path != ""
             has_rows = self._summarize_exclude_rule_tasks()["pending"] > 0
             self.btn_mark_exclude_rule_current.setEnabled(has_file and has_rows)
+
+        if hasattr(self, "btn_save_settlement_term_current"):
+            has_file = self.current_file_path != ""
+            has_rows = len(self.settlement_term_tasks) > 0
+            self.btn_save_settlement_term_current.setEnabled(has_file and has_rows)
+            self.btn_save_settlement_term_done.setEnabled(has_file and has_rows)
 
         self.current_task_title.setText(recommendation["title"])
         self.current_task_reason.setText(recommendation["reason"])
@@ -1483,28 +1642,44 @@ class MainWindow(QMainWindow):
             count_label.setText(
                 f"当前待处理：{summary['pending']} 条｜已处理：{summary['done']} 条｜总数：{summary['total']} 条"
             )
-            pending_tasks = [task for task in self.settlement_term_tasks if task.get("status") != "已处理"]
-            if len(pending_tasks) == 0:
-                rows = [["EMPTY", "-", "-", "-", "-", "当前无待维护结算条款", "空状态"]]
+            self.settlement_terms_visible_task_ids = []
+            if len(self.settlement_term_tasks) == 0:
+                rows = [["-", "-", "-", "当前无待维护结算条款", "-", "空状态"]]
+                self.settlement_terms_visible_task_ids.append("")
             else:
                 rows = []
-                for task in pending_tasks:
+                for task in self.settlement_term_tasks:
                     raw_count = int(task.get("raw_count") or 1)
                     reason = str(task.get("reason") or "")
-                    if raw_count > 1:
-                        reason = f"{reason}（涉及 {raw_count} 行）"
+                    self.settlement_terms_visible_task_ids.append(str(task.get("task_id") or ""))
                     rows.append(
                         [
-                            str(task.get("task_id") or ""),
-                            str(task.get("raw_row") or ""),
-                            str(task.get("doc_no") or ""),
                             str(task.get("customer_code") or ""),
                             str(task.get("customer_name") or ""),
+                            str(task.get("doc_no") or ""),
                             reason,
+                            str(raw_count),
                             str(task.get("status") or "待处理"),
                         ]
                     )
-            self._fill_table(table, rows, 7)
+            self._fill_table(table, rows, 6)
+            if len(self.settlement_term_tasks) > 0:
+                if self.current_settlement_term_task_id == "":
+                    self.current_settlement_term_task_id = self.settlement_terms_visible_task_ids[0]
+                    target_task = next(
+                        (
+                            task
+                            for task in self.settlement_term_tasks
+                            if str(task.get("task_id")) == self.current_settlement_term_task_id
+                        ),
+                        None,
+                    )
+                    if target_task is not None:
+                        self._set_settlement_term_form_values(build_form_defaults(target_task))
+                target_index = 0
+                if self.current_settlement_term_task_id in self.settlement_terms_visible_task_ids:
+                    target_index = self.settlement_terms_visible_task_ids.index(self.current_settlement_term_task_id)
+                table.selectRow(target_index)
             return
 
         count_label.setText(f"当前待处理：{count} 条")

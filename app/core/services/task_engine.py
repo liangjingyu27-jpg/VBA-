@@ -114,6 +114,8 @@ def num(v: Any) -> Optional[float]:
     if isinstance(v, (int, float)):
         return float(v)
     t = s(v).replace(",", "")
+    if t.endswith("%"):
+        t = t[:-1].strip()
     if t == "":
         return None
     try:
@@ -571,3 +573,34 @@ def summarize_settlement_term_tasks(tasks: list[dict[str, Any]]) -> dict[str, in
         "done": done,
         "pending": pending,
     }
+
+
+def can_mark_settlement_term_done(task: dict[str, Any], payload_written: bool) -> tuple[bool, str]:
+    payload = task.get("maintain_payload")
+    if not isinstance(payload, dict):
+        return False, "当前客户尚未保存结算条款填写内容。"
+    if not payload_written:
+        return False, "当前维护值未写入结果层，不能标记已处理。"
+
+    def get_value(en_key: str, zh_key: str) -> Any:
+        return payload.get(en_key) if en_key in payload else payload.get(zh_key)
+
+    required = [
+        ("enabled", "是否启用"),
+        ("customer_code", "客户编码"),
+        ("settle_type", "结算类型"),
+        ("start_month", "生效月份"),
+    ]
+    for en_key, zh_key in required:
+        if s(get_value(en_key, zh_key)) == "":
+            return False, f"字段“{zh_key}”缺失，不能标记已处理。"
+
+    settle_type = s(get_value("settle_type", "结算类型"))
+    if settle_type == "费比" and num(get_value("ratio", "费比")) is None:
+        return False, "结算类型为费比时，必须填写费比。"
+    if settle_type == "固定金额" and num(get_value("fixed_amount", "固定金额")) is None:
+        return False, "结算类型为固定金额时，必须填写固定金额。"
+    if settle_type == "不计费" and s(get_value("no_charge_reason", "不计费原因")) == "":
+        return False, "结算类型为不计费时，必须填写不计费原因。"
+
+    return True, "OK"
