@@ -5,6 +5,8 @@ from openpyxl import load_workbook
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
+from app.core.services.settlement_terms_service import SETTLEMENT_TERM_TEMPLATE_FIELDS, to_template_row
+
 
 @dataclass
 class ExcelLoadResult:
@@ -182,3 +184,16 @@ def sheet_to_dict_rows(sheet: Worksheet, header_row: int = 1) -> list[dict[str, 
         dict_rows.append(row_dict)
 
     return dict_rows
+
+
+def upsert_settlement_term_result(
+    result_store: dict[str, dict[str, Any]],
+    task_id: str,
+    payload: dict[str, Any],
+) -> bool:
+    if task_id.strip() == "":
+        return False
+
+    template_row = to_template_row(payload)
+    result_store[task_id] = {field: template_row.get(field, "") for field in SETTLEMENT_TERM_TEMPLATE_FIELDS}
+    return True
