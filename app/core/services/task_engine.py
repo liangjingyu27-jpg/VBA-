@@ -79,20 +79,39 @@ def to_month(v: Any) -> str:
         return ""
     if hasattr(v, "year") and hasattr(v, "month"):
         try:
-            return f"{int(v.year):04d}-{int(v.month):02d}"
+            year = int(v.year)
+            month = int(v.month)
+            if 1 <= month <= 12:
+                return f"{year:04d}-{month:02d}"
+            return ""
         except Exception:
-            pass
+            return ""
+
     t = s(v)
     if not t:
         return ""
-    m = re.match(r"^\s*(\d{4})[-/](\d{1,2})", t)
+
+    m = re.match(r"^(\d{4})(\d{2})$", t)
     if m:
-        y = int(m.group(1))
-        mm = int(m.group(2))
-        return f"{y:04d}-{mm:02d}"
+        year = int(m.group(1))
+        month = int(m.group(2))
+        if 1 <= month <= 12:
+            return f"{year:04d}-{month:02d}"
+        return ""
+
+    m = re.match(r"^(\d{4})[-/](\d{1,2})$", t)
+    if m:
+        year = int(m.group(1))
+        month = int(m.group(2))
+        if 1 <= month <= 12:
+            return f"{year:04d}-{month:02d}"
+        return ""
+
     try:
         dt = datetime.fromisoformat(t.replace("/", "-"))
-        return f"{dt.year:04d}-{dt.month:02d}"
+        if 1 <= dt.month <= 12:
+            return f"{dt.year:04d}-{dt.month:02d}"
+        return ""
     except Exception:
         return ""
 

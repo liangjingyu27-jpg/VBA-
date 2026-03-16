@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+
+import re
 
 SETTLEMENT_TYPES = ["费比", "固定金额", "不计费", "按实际"]
 SETTLEMENT_TERM_TEMPLATE_FIELDS = [
@@ -27,15 +30,45 @@ def normalize_text(value: Any) -> str:
 
 
 def normalize_month(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "year") and hasattr(value, "month"):
+        try:
+            year = int(value.year)
+            month = int(value.month)
+            if 1 <= month <= 12:
+                return f"{year:04d}-{month:02d}"
+            return ""
+        except Exception:
+            return ""
+
     text = normalize_text(value)
     if text == "":
         return ""
-    text = text.replace("/", "-")
-    if len(text) == 7 and text[4] == "-":
-        return text
-    if len(text) == 6 and text.isdigit():
-        return f"{text[:4]}-{text[4:]}"
-    return text
+
+    m = re.match(r"^(\d{4})(\d{2})$", text)
+    if m:
+        year = int(m.group(1))
+        month = int(m.group(2))
+        if 1 <= month <= 12:
+            return f"{year:04d}-{month:02d}"
+        return ""
+
+    m = re.match(r"^(\d{4})[-/](\d{1,2})$", text)
+    if m:
+        year = int(m.group(1))
+        month = int(m.group(2))
+        if 1 <= month <= 12:
+            return f"{year:04d}-{month:02d}"
+        return ""
+
+    try:
+        dt = datetime.fromisoformat(text.replace("/", "-"))
+        if 1 <= dt.month <= 12:
+            return f"{dt.year:04d}-{dt.month:02d}"
+        return ""
+    except Exception:
+        return ""
 
 
 def to_optional_float(value: Any) -> float | None:
@@ -115,8 +148,15 @@ def build_payload(form_values: dict[str, Any]) -> tuple[dict[str, Any], list[str
         errors.append("客户编码")
     if payload["settle_type"] not in SETTLEMENT_TYPES:
         errors.append("结算类型")
+    raw_start_month = normalize_text(form_values.get("start_month", ""))
+    raw_end_month = normalize_text(form_values.get("end_month", ""))
     if payload["start_month"] == "":
-        errors.append("生效月份")
+        if raw_start_month == "":
+            errors.append("生效月份")
+        else:
+            errors.append("生效月份格式错误")
+    if raw_end_month != "" and payload["end_month"] == "":
+        errors.append("失效月份格式错误")
 
     settle_type = payload["settle_type"]
     if settle_type == "费比":
