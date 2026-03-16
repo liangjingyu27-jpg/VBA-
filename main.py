@@ -245,6 +245,8 @@ class MainWindow(QMainWindow):
         self.actual_freight_edited_rows: set[int] = set()
         self._is_refreshing_actual_freight_table = False
         self.exclude_rule_tasks: list[dict[str, str | int]] = []
+        self.exclude_rules_visible_task_ids: list[str] = []
+        self.current_exclude_rule_task_id = ""
         self.settlement_term_tasks: list[dict[str, str | int]] = []
         self.settlement_term_results: dict[str, dict[str, str]] = {}
         self.settlement_terms_visible_task_ids: list[str] = []
@@ -730,13 +732,14 @@ class MainWindow(QMainWindow):
         layout.addLayout(top_row)
 
         if stage_key == "exclude_rules":
-            self.btn_mark_exclude_rule_current = QPushButton("标记当前行已处理")
-            self.btn_mark_exclude_rule_current.setObjectName("PrimaryButton")
-            self.btn_mark_exclude_rule_current.clicked.connect(self._mark_exclude_rule_current_done)
-            top_row.addWidget(self.btn_mark_exclude_rule_current)
+            self.btn_save_exclude_rule_current = QPushButton("保存当前规则")
+            self.btn_save_exclude_rule_current.setObjectName("PrimaryButton")
+            self.btn_save_exclude_rule_current.clicked.connect(self._save_exclude_rule_current)
+            top_row.addWidget(self.btn_save_exclude_rule_current)
 
             table = QTableWidget(0, 7)
             table.setHorizontalHeaderLabels(["任务ID", "源行", "单据编号", "客户编码", "客户名称", "命中信息", "状态"])
+            table.itemSelectionChanged.connect(self._on_exclude_rule_table_selection_changed)
         elif stage_key == "settlement_terms":
             self.btn_save_settlement_term_current = QPushButton("保存当前客户")
             self.btn_save_settlement_term_current.setObjectName("PrimaryButton")
@@ -778,6 +781,14 @@ class MainWindow(QMainWindow):
             table.setMinimumHeight(420)
         setattr(self, f"{stage_key}_table", table)
 
+        if stage_key == "exclude_rules":
+            form_title = QLabel("候选规则维护区")
+            form_title.setObjectName("PanelTitle")
+            layout.addWidget(form_title)
+            self.exclude_rules_form = self._build_exclude_rule_form()
+            self.exclude_rules_form.setVisible(True)
+            layout.addWidget(self.exclude_rules_form)
+
         if stage_key == "settlement_terms":
             form_title = QLabel("结算条款填写区")
             form_title.setObjectName("PanelTitle")
@@ -790,6 +801,42 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
         return shell
+
+    def _build_exclude_rule_form(self) -> QWidget:
+        box = QFrame()
+        box.setObjectName("PanelShell")
+        layout = QGridLayout(box)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(6)
+
+        self.er_candidate_scope = QComboBox()
+        self.er_candidate_scope.addItems(["运输线路", "运输方式", "收货渠道地址", "备注", "全部"])
+        self.er_candidate_action = QComboBox()
+        self.er_candidate_action.addItems(["排除", "保留", "待确认"])
+        self.er_candidate_keyword = QLineEdit()
+        self.er_candidate_remark = QLineEdit()
+        self.er_source_preview = QLineEdit()
+        self.er_source_preview.setReadOnly(True)
+
+        fields = [
+            ("候选范围", self.er_candidate_scope),
+            ("候选动作", self.er_candidate_action),
+            ("候选关键词", self.er_candidate_keyword),
+            ("维护备注", self.er_candidate_remark),
+            ("源数据预览", self.er_source_preview),
+        ]
+
+        for idx, (label_text, widget) in enumerate(fields):
+            row = idx // 2
+            col = (idx % 2) * 2
+            layout.addWidget(QLabel(label_text), row, col)
+            if label_text == "源数据预览":
+                layout.addWidget(widget, row, col + 1, 1, 3)
+            else:
+                layout.addWidget(widget, row, col + 1)
+
+        return box
 
     def _build_settlement_term_form(self) -> QWidget:
         box = QFrame()
@@ -1067,6 +1114,7 @@ class MainWindow(QMainWindow):
             self.source_preview_rows = result.preview_rows
             self.settlement_term_results = {}
             self.current_settlement_term_task_id = ""
+            self.current_exclude_rule_task_id = ""
 
             raw_sheet = workbook[result.source_sheet_name]
             raw_rows = sheet_to_dict_rows(raw_sheet, header_row=1)
@@ -1141,6 +1189,7 @@ class MainWindow(QMainWindow):
 
         except Exception as exc:
             self.exclude_rule_tasks = []
+            self.current_exclude_rule_task_id = ""
             self.actual_freight_tasks = []
             self.settlement_term_tasks = []
             self.task_pool["exclude_rules"] = 0
@@ -1287,7 +1336,38 @@ class MainWindow(QMainWindow):
     def _summarize_settlement_term_tasks(self) -> dict[str, int]:
         return summarize_settlement_term_tasks(self.settlement_term_tasks)
 
-    def _mark_exclude_rule_current_done(self) -> None:
+    def _set_exclude_rule_form_values(self, task: dict[str, str | int]) -> None:
+        self.er_candidate_scope.setCurrentText(str(task.get("candidate_scope") or "全部"))
+        self.er_candidate_action.setCurrentText(str(task.get("candidate_action") or "排除"))
+        self.er_candidate_keyword.setText(str(task.get("candidate_keyword") or ""))
+        self.er_candidate_remark.setText(str(task.get("candidate_remark") or ""))
+        preview_parts = [
+            f"线路:{str(task.get('line') or '-')}",
+            f"方式:{str(task.get('mode') or '-')}",
+            f"地址:{str(task.get('addr') or '-')}",
+            f"备注:{str(task.get('remark') or '-')}",
+        ]
+        self.er_source_preview.setText("｜".join(preview_parts))
+
+    def _on_exclude_rule_table_selection_changed(self) -> None:
+        table: QTableWidget = getattr(self, "exclude_rules_table", None)
+        if table is None:
+            return
+        row_index = table.currentRow()
+        if row_index < 0 or row_index >= len(self.exclude_rules_visible_task_ids):
+            return
+        task_id = self.exclude_rules_visible_task_ids[row_index]
+        if task_id == "":
+            return
+
+        target_task = next((task for task in self.exclude_rule_tasks if str(task.get("task_id")) == task_id), None)
+        if target_task is None:
+            return
+
+        self.current_exclude_rule_task_id = task_id
+        self._set_exclude_rule_form_values(target_task)
+
+    def _save_exclude_rule_current(self) -> None:
         if self.current_file_path == "":
             self._show_feedback("当前提示：请先导入原始数据，再进行排除规则维护。")
             return
@@ -1298,7 +1378,7 @@ class MainWindow(QMainWindow):
 
         row_index = table.currentRow()
         if row_index < 0 or row_index >= table.rowCount():
-            self._show_feedback("当前提示：请先选中一条任务，再执行“标记当前行已处理”。")
+            self._show_feedback("当前提示：请先选中一条任务，再执行“保存当前规则”。")
             return
 
         task_id_item = table.item(row_index, 0)
@@ -1312,14 +1392,21 @@ class MainWindow(QMainWindow):
             self._show_feedback("当前提示：未找到对应任务，请刷新后重试。")
             return
 
-        if target_task.get("status") == "已处理":
-            self._show_feedback("当前提示：当前行已是“已处理”状态。")
+        keyword = self.er_candidate_keyword.text().strip()
+        if keyword == "":
+            self._show_feedback("当前卡点：请填写候选关键词后再保存。")
             return
 
+        target_task["candidate_scope"] = self.er_candidate_scope.currentText().strip()
+        target_task["candidate_action"] = self.er_candidate_action.currentText().strip()
+        target_task["candidate_keyword"] = keyword
+        target_task["candidate_remark"] = self.er_candidate_remark.text().strip()
+        target_task["saved"] = True
         target_task["status"] = "已处理"
+        self.current_exclude_rule_task_id = task_id
         summary = self._summarize_exclude_rule_tasks()
         self.task_pool["exclude_rules"] = summary["pending"]
-        self._show_feedback(f"当前状态：排除规则任务 {task_id} 已处理，剩余待处理 {summary['pending']} 条。")
+        self._show_feedback(f"当前状态：排除规则任务 {task_id} 已保存并标记已处理，剩余待处理 {summary['pending']} 条。")
         self._refresh_ui()
 
     def _collect_settlement_term_form_values(self) -> dict[str, str]:
@@ -1466,6 +1553,7 @@ class MainWindow(QMainWindow):
         if key == "exclude_rules":
             for task in self.exclude_rule_tasks:
                 task["status"] = "已处理"
+            self.current_exclude_rule_task_id = ""
         if key == "settlement_terms":
             for task in self.settlement_term_tasks:
                 task["status"] = "已处理"
@@ -1540,10 +1628,10 @@ class MainWindow(QMainWindow):
             self.btn_save_actual_freight_current.setEnabled(has_file and has_rows)
             self.btn_save_actual_freight_all.setEnabled(has_file and has_rows)
 
-        if hasattr(self, "btn_mark_exclude_rule_current"):
+        if hasattr(self, "btn_save_exclude_rule_current"):
             has_file = self.current_file_path != ""
             has_rows = self._summarize_exclude_rule_tasks()["pending"] > 0
-            self.btn_mark_exclude_rule_current.setEnabled(has_file and has_rows)
+            self.btn_save_exclude_rule_current.setEnabled(has_file and has_rows)
 
         if hasattr(self, "btn_save_settlement_term_current"):
             has_file = self.current_file_path != ""
@@ -1631,15 +1719,22 @@ class MainWindow(QMainWindow):
             count_label.setText(
                 f"当前待处理：{summary['pending']} 条｜已处理：{summary['done']} 条｜总数：{summary['total']} 条"
             )
+            self.exclude_rules_visible_task_ids = []
             pending_tasks = [task for task in self.exclude_rule_tasks if task.get("status") != "已处理"]
             if len(pending_tasks) == 0:
                 rows = [["EMPTY", "-", "-", "-", "-", "当前无待维护排除规则", "空状态"]]
+                self.exclude_rules_visible_task_ids.append("")
+                self.current_exclude_rule_task_id = ""
+                self.er_candidate_keyword.setText("")
+                self.er_candidate_remark.setText("")
+                self.er_source_preview.setText("当前无待维护任务")
             else:
                 rows = []
                 for task in pending_tasks:
                     hit_keyword = str(task.get("hit_keyword") or "")
                     hit_field = str(task.get("hit_field") or "")
                     hit_info = f"{hit_field} / {hit_keyword}" if hit_keyword else hit_field
+                    self.exclude_rules_visible_task_ids.append(str(task.get("task_id") or ""))
                     rows.append(
                         [
                             str(task.get("task_id") or ""),
@@ -1652,6 +1747,25 @@ class MainWindow(QMainWindow):
                         ]
                     )
             self._fill_table(table, rows, 7)
+            if len(pending_tasks) > 0:
+                if self.current_exclude_rule_task_id == "" or self.current_exclude_rule_task_id not in self.exclude_rules_visible_task_ids:
+                    self.current_exclude_rule_task_id = self.exclude_rules_visible_task_ids[0]
+
+                target_task = next(
+                    (
+                        task
+                        for task in pending_tasks
+                        if str(task.get("task_id") or "") == self.current_exclude_rule_task_id
+                    ),
+                    None,
+                )
+                if target_task is None:
+                    target_task = pending_tasks[0]
+                    self.current_exclude_rule_task_id = str(target_task.get("task_id") or "")
+                self._set_exclude_rule_form_values(target_task)
+
+                target_index = self.exclude_rules_visible_task_ids.index(self.current_exclude_rule_task_id)
+                table.selectRow(target_index)
             return
 
         if key == "settlement_terms":
