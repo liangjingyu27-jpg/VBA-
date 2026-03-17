@@ -33,6 +33,7 @@ from app.core.services.excel_service import (
     find_sheet_by_keywords,
     open_excel_with_source,
     sheet_to_dict_rows,
+    upsert_exclude_rule_result,
     upsert_settlement_term_result,
 )
 from app.core.services.settlement_terms_service import (
@@ -245,6 +246,7 @@ class MainWindow(QMainWindow):
         self.actual_freight_edited_rows: set[int] = set()
         self._is_refreshing_actual_freight_table = False
         self.exclude_rule_tasks: list[dict[str, str | int]] = []
+        self.exclude_rule_results: dict[str, dict[str, str]] = {}
         self.settlement_term_tasks: list[dict[str, str | int]] = []
         self.settlement_term_results: dict[str, dict[str, str]] = {}
         self.settlement_terms_visible_task_ids: list[str] = []
@@ -1065,6 +1067,7 @@ class MainWindow(QMainWindow):
             self.source_rows = result.source_rows
             self.source_cols = result.source_cols
             self.source_preview_rows = result.preview_rows
+            self.exclude_rule_results = {}
             self.settlement_term_results = {}
             self.current_settlement_term_task_id = ""
 
@@ -1314,6 +1317,23 @@ class MainWindow(QMainWindow):
 
         if target_task.get("status") == "已处理":
             self._show_feedback("当前提示：当前行已是“已处理”状态。")
+            return
+
+        exclude_payload = {
+            "candidate_scope": str(target_task.get("candidate_scope") or ""),
+            "candidate_action": str(target_task.get("candidate_action") or ""),
+            "candidate_keyword": str(target_task.get("candidate_keyword") or target_task.get("hit_keyword") or ""),
+            "candidate_remark": str(target_task.get("candidate_remark") or ""),
+            "doc_no": str(target_task.get("doc_no") or ""),
+            "raw_row": str(target_task.get("raw_row") or ""),
+            "line": str(target_task.get("line") or ""),
+            "mode": str(target_task.get("mode") or ""),
+            "addr": str(target_task.get("addr") or ""),
+            "remark": str(target_task.get("remark") or ""),
+        }
+        saved_ok = upsert_exclude_rule_result(self.exclude_rule_results, task_id, exclude_payload)
+        if not saved_ok:
+            self._show_feedback("当前卡点：排除规则维护值写入结果层失败，请重试。")
             return
 
         target_task["status"] = "已处理"

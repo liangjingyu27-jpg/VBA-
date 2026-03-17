@@ -197,3 +197,29 @@ def upsert_settlement_term_result(
     template_row = to_template_row(payload)
     result_store[task_id] = {field: template_row.get(field, "") for field in SETTLEMENT_TERM_TEMPLATE_FIELDS}
     return True
+
+
+def upsert_exclude_rule_result(
+    result_store: dict[str, dict[str, str]],
+    task_id: str,
+    payload: dict[str, Any],
+) -> bool:
+    normalized_task_id = task_id.strip()
+    if normalized_task_id == "":
+        return False
+
+    fields = [
+        "candidate_scope",
+        "candidate_action",
+        "candidate_keyword",
+        "candidate_remark",
+        "doc_no",
+        "raw_row",
+        "line",
+        "mode",
+        "addr",
+        "remark",
+    ]
+
+    result_store[normalized_task_id] = {field: safe_text(payload.get(field)) for field in fields}
+    return True
